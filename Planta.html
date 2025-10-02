@@ -1,0 +1,641 @@
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Celda Industrial Automatizada</title>
+  <script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
+  <script>
+    AFRAME.registerComponent('conveyor-belt', {
+      schema: {
+        speed: {type: 'number', default: 0.3}
+      },
+      init: function() {
+        this.boxes = [];
+        this.spawnTimer = 0;
+        this.spawnInterval = 9000;
+        this.boxId = 0;
+        this.canSpawn = true;
+      },
+      tick: function(time, deltaTime) {
+        this.spawnTimer += deltaTime;
+        
+        const robot = document.querySelector('[robot-arm]');
+        const truck = document.querySelector('[delivery-truck]');
+        
+        if (robot && truck && 
+            robot.components['robot-arm'].state === 'waiting' && 
+            truck.components['delivery-truck'].state === 'waiting' &&
+            this.canSpawn) {
+          if (this.spawnTimer >= this.spawnInterval) {
+            this.spawnBox();
+            this.spawnTimer = 0;
+            this.canSpawn = false;
+          }
+        }
+        
+        for (let i = this.boxes.length - 1; i >= 0; i--) {
+          let box = this.boxes[i];
+          if (!box.el || !box.el.parentNode) {
+            this.boxes.splice(i, 1);
+            continue;
+          }
+          
+          // Solo mover la caja si NO ha sido recogida
+          if (!box.el.classList.contains('picked')) {
+            let pos = box.el.object3D.position;
+            pos.z += this.data.speed * (deltaTime / 1000);
+            
+            if (pos.z > 6) {
+              if (box.el.parentNode) {
+                box.el.parentNode.removeChild(box.el);
+              }
+              this.boxes.splice(i, 1);
+            }
+          }
+        }
+      },
+      spawnBox: function() {
+        const box = document.createElement('a-box');
+        const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F39C12'];
+        const color = colors[Math.floor(Math.random() * colors.length)];
+        
+        box.setAttribute('position', '0 0.85 -4');
+        box.setAttribute('width', '0.35');
+        box.setAttribute('height', '0.35');
+        box.setAttribute('depth', '0.35');
+        box.setAttribute('color', color);
+        box.setAttribute('shadow', 'cast: true; receive: true');
+        box.setAttribute('id', 'conveyor-box-' + this.boxId);
+        box.classList.add('conveyor-box');
+        
+        this.el.sceneEl.appendChild(box);
+        this.boxes.push({el: box, color: color, id: this.boxId});
+        this.boxId++;
+      }
+    });
+
+    AFRAME.registerComponent('robot-arm', {
+      init: function() {
+        this.state = 'waiting';
+        this.targetBox = null;
+        this.pickTimer = 0;
+        this.storagePosition = 0;
+        this.baseRotation = 0;
+        this.shoulder = -20;
+        this.elbow = 45;
+        this.gripperOpen = 0.15;
+        this.attachedBox = null;
+        this.stateTimer = 0;
+      },
+      tick: function(time, deltaTime) {
+        const dt = deltaTime / 1000;
+        this.stateTimer += deltaTime;
+        
+        switch(this.state) {
+          case 'waiting':
+            this.checkForBoxes();
+            break;
+            
+          case 'moving_to_pick':
+            this.moveToPick(dt);
+            break;
+            
+          case 'descending':
+            this.descendToBox(dt);
+            break;
+            
+          case 'closing_gripper':
+            this.closeGripper(dt);
+            if (this.stateTimer > 400) {
+              this.state = 'lifting';
+              this.stateTimer = 0;
+            }
+            break;
+            
+          case 'lifting':
+            this.liftBox(dt);
+            break;
+            
+          case 'moving_to_storage':
+            this.moveToStorage(dt);
+            break;
+            
+          case 'placing':
+            this.placeBox(dt);
+            if (this.stateTimer > 500) {
+              this.state = 'opening_gripper';
+              this.stateTimer = 0;
+            }
+            break;
+            
+          case 'opening_gripper':
+            this.openGripper(dt);
+            if (this.stateTimer > 250) {
+              this.detachBox();
+              this.state = 'returning';
+              this.stateTimer = 0;
+            }
+            break;
+            
+          case 'returning':
+            this.returnToStart(dt);
+            break;
+        }
+        
+        this.updateArmPosition();
+        this.updateAttachedBox();
+      },
+      checkForBoxes: function() {
+        const boxes = document.querySelectorAll('.conveyor-box');
+        for (let box of boxes) {
+          if (!box.object3D) continue;
+          const pos = box.object3D.position;
+          if (pos.z >= 1.8 && pos.z <= 2.2 && !box.classList.contains('picked')) {
+            this.targetBox = box;
+            this.state = 'moving_to_pick';
+            this.stateTimer = 0;
+            box.classList.add('picked');
+            
+            const conveyor = document.querySelector('[conveyor-belt]');
+            if (conveyor) {
+              conveyor.components['conveyor-belt'].canSpawn = true;
+            }
+            break;
+          }
+        }
+      },
+      moveToPick: function(dt) {
+        if (!this.targetBox || !this.targetBox.parentNode) {
+          this.state = 'waiting';
+          this.targetBox = null;
+          return;
+        }
+        
+        this.baseRotation = this.lerp(this.baseRotation, -90, dt * 2);
+        this.shoulder = this.lerp(this.shoulder, -20, dt * 2);
+        this.elbow = this.lerp(this.elbow, 45, dt * 2);
+        
+        if (Math.abs(this.baseRotation + 90) < 2) {
+          this.state = 'descending';
+          this.stateTimer = 0;
+        }
+      },
+      descendToBox: function(dt) {
+        this.shoulder = this.lerp(this.shoulder, -70, dt * 2);
+        this.elbow = this.lerp(this.elbow, 90, dt * 2);
+        
+        if (this.stateTimer > 600) {
+          this.attachBox();
+          this.state = 'closing_gripper';
+          this.stateTimer = 0;
+        }
+      },
+      closeGripper: function(dt) {
+        this.gripperOpen = this.lerp(this.gripperOpen, 0.05, dt * 3);
+      },
+      liftBox: function(dt) {
+        this.shoulder = this.lerp(this.shoulder, -30, dt * 2);
+        this.elbow = this.lerp(this.elbow, 60, dt * 2);
+        
+        if (Math.abs(this.shoulder + 30) < 2) {
+          this.state = 'moving_to_storage';
+          this.stateTimer = 0;
+        }
+      },
+      moveToStorage: function(dt) {
+        this.baseRotation = this.lerp(this.baseRotation, 90, dt * 2.5);
+        this.shoulder = this.lerp(this.shoulder, -50, dt * 2);
+        this.elbow = this.lerp(this.elbow, 80, dt * 2);
+        
+        if (Math.abs(this.baseRotation - 90) < 2) {
+          this.state = 'placing';
+          this.stateTimer = 0;
+        }
+      },
+      placeBox: function(dt) {
+        this.shoulder = this.lerp(this.shoulder, -70, dt * 2);
+        this.elbow = this.lerp(this.elbow, 100, dt * 2);
+      },
+      openGripper: function(dt) {
+        this.gripperOpen = this.lerp(this.gripperOpen, 0.15, dt * 3);
+      },
+      returnToStart: function(dt) {
+        this.baseRotation = this.lerp(this.baseRotation, 0, dt * 2.5);
+        this.shoulder = this.lerp(this.shoulder, -20, dt * 2);
+        this.elbow = this.lerp(this.elbow, 45, dt * 2);
+        
+        if (Math.abs(this.baseRotation) < 2 && Math.abs(this.shoulder + 20) < 2) {
+          this.state = 'waiting';
+          this.stateTimer = 0;
+        }
+      },
+      attachBox: function() {
+        if (this.targetBox && this.targetBox.parentNode) {
+          this.attachedBox = this.targetBox;
+        }
+      },
+      detachBox: function() {
+        if (this.attachedBox && this.attachedBox.parentNode) {
+          const truck = document.querySelector('#delivery-truck');
+          const truckComponent = truck.components['delivery-truck'];
+          
+          const boxNum = truckComponent.boxCount;
+          const x = (boxNum % 2) * 0.4 - 0.2;
+          const y = 0.5 + Math.floor(boxNum / 2) * 0.4;
+          const z = 0;
+          
+          this.attachedBox.classList.remove('picked');
+          this.attachedBox.classList.add('stored');
+          truck.appendChild(this.attachedBox);
+          this.attachedBox.object3D.position.set(x, y, z);
+          
+          truckComponent.receiveBox();
+          
+          this.attachedBox = null;
+          this.targetBox = null;
+        }
+      },
+      updateAttachedBox: function() {
+        if (this.attachedBox && this.attachedBox.parentNode && !this.attachedBox.classList.contains('stored')) {
+          const gripper = document.querySelector('#gripper-center');
+          if (gripper && gripper.object3D) {
+            const worldPos = new THREE.Vector3();
+            const worldRot = new THREE.Quaternion();
+            
+            gripper.object3D.getWorldPosition(worldPos);
+            gripper.object3D.getWorldQuaternion(worldRot);
+            
+            // Actualizar posición de la caja pegada al gripper
+            this.attachedBox.object3D.position.copy(worldPos);
+            this.attachedBox.object3D.position.y -= 0.25;
+            
+            // Copiar la rotación del brazo para que la caja rote con él
+            this.attachedBox.object3D.quaternion.copy(worldRot);
+          }
+        }
+      },
+      updateArmPosition: function() {
+        const base = document.querySelector('#arm-base');
+        const shoulder = document.querySelector('#shoulder-joint');
+        const elbow = document.querySelector('#elbow-joint');
+        const leftFinger = document.querySelector('#left-finger');
+        const rightFinger = document.querySelector('#right-finger');
+        
+        if (base) {
+          base.object3D.rotation.y = THREE.MathUtils.degToRad(this.baseRotation);
+        }
+        if (shoulder) {
+          shoulder.object3D.rotation.x = THREE.MathUtils.degToRad(this.shoulder);
+        }
+        if (elbow) {
+          elbow.object3D.rotation.x = THREE.MathUtils.degToRad(this.elbow);
+        }
+        if (leftFinger) {
+          leftFinger.object3D.position.x = -this.gripperOpen;
+        }
+        if (rightFinger) {
+          rightFinger.object3D.position.x = this.gripperOpen;
+        }
+      },
+      lerp: function(start, end, t) {
+        return start + (end - start) * Math.min(t, 1);
+      }
+    });
+
+    AFRAME.registerComponent('delivery-truck', {
+      init: function() {
+        this.state = 'waiting';
+        this.position = 0;
+        this.boxCount = 0;
+        this.stateTimer = 0;
+      },
+      tick: function(time, deltaTime) {
+        const dt = deltaTime / 1000;
+        this.stateTimer += deltaTime;
+        
+        switch(this.state) {
+          case 'waiting':
+            break;
+            
+          case 'leaving':
+            this.position += dt * 2;
+            this.el.object3D.position.z = 2 - this.position;
+            
+            if (this.position >= 8) {
+              this.state = 'returning';
+              this.stateTimer = 0;
+              this.boxCount = 0;
+              const boxes = this.el.querySelectorAll('.stored');
+              boxes.forEach(box => {
+                if (box.parentNode) {
+                  box.parentNode.removeChild(box);
+                }
+              });
+            }
+            break;
+            
+          case 'returning':
+            this.position -= dt * 2;
+            this.el.object3D.position.z = 2 - this.position;
+            
+            if (this.position <= 0) {
+              this.position = 0;
+              this.el.object3D.position.z = 2;
+              this.state = 'waiting';
+              this.stateTimer = 0;
+            }
+            break;
+        }
+      },
+      receiveBox: function() {
+        this.boxCount++;
+        if (this.boxCount >= 3) {
+          this.state = 'leaving';
+          this.stateTimer = 0;
+        }
+      }
+    });
+  </script>
+</head>
+<body>
+  <a-scene background="color: #1A1A1A">
+    <!-- Iluminación industrial -->
+    <a-light type="ambient" color="#444" intensity="0.6"></a-light>
+    <a-light type="directional" color="#FFF" intensity="0.8" position="5 10 5" castShadow="true"></a-light>
+    <a-light type="point" color="#FFD700" intensity="0.5" position="-5 8 -3"></a-light>
+    <a-light type="point" color="#FFD700" intensity="0.5" position="5 8 5"></a-light>
+    <a-light type="point" color="#FF6B00" intensity="0.4" position="0 6 0"></a-light>
+
+    <!-- Cámara -->
+    <a-entity camera look-controls wasd-controls position="8 6 8" rotation="-30 -45 0">
+      <a-cursor color="#FFD700"></a-cursor>
+    </a-entity>
+
+    <!-- Piso industrial con líneas -->
+    <a-plane position="0 0 0" rotation="-90 0 0" width="25" height="25" color="#2A2A2A" shadow="receive: true"></a-plane>
+    
+    <!-- Rejilla del piso -->
+    <a-entity position="0 0.01 0">
+      <a-box position="0 0 -5" rotation="-90 0 0" width="0.05" height="20" depth="0.01" color="#FFD700" opacity="0.3"></a-box>
+      <a-box position="0 0 0" rotation="-90 0 0" width="0.05" height="20" depth="0.01" color="#FFD700" opacity="0.3"></a-box>
+      <a-box position="0 0 5" rotation="-90 0 0" width="0.05" height="20" depth="0.01" color="#FFD700" opacity="0.3"></a-box>
+      <a-box position="-5 0 0" rotation="-90 90 0" width="0.05" height="20" depth="0.01" color="#FFD700" opacity="0.3"></a-box>
+      <a-box position="5 0 0" rotation="-90 90 0" width="0.05" height="20" depth="0.01" color="#FFD700" opacity="0.3"></a-box>
+    </a-entity>
+
+    <!-- Banda Transportadora Industrial -->
+    <a-entity id="conveyor" position="0 0 0" conveyor-belt="speed: 0.6">
+      <a-box position="0 0.35 -1" width="1" height="0.6" depth="10" color="#1C1C1C" shadow></a-box>
+      <a-box position="0 0.68 -1" width="0.9" height="0.06" depth="10" color="#404040" shadow></a-box>
+      
+      <a-box position="0 0.72 -5" width="0.05" height="0.02" depth="0.8" color="#FFD700"></a-box>
+      <a-box position="0 0.72 -3" width="0.05" height="0.02" depth="0.8" color="#FFD700"></a-box>
+      <a-box position="0 0.72 -1" width="0.05" height="0.02" depth="0.8" color="#FFD700"></a-box>
+      <a-box position="0 0.72 1" width="0.05" height="0.02" depth="0.8" color="#FFD700"></a-box>
+      <a-box position="0 0.72 3" width="0.05" height="0.02" depth="0.8" color="#FFD700"></a-box>
+      
+      <a-cylinder position="0.5 0.6 -4" radius="0.06" height="0.1" rotation="0 0 90" color="#0A0A0A"></a-cylinder>
+      <a-cylinder position="-0.5 0.6 -4" radius="0.06" height="0.1" rotation="0 0 90" color="#0A0A0A"></a-cylinder>
+      <a-cylinder position="0.5 0.6 0" radius="0.06" height="0.1" rotation="0 0 90" color="#0A0A0A"></a-cylinder>
+      <a-cylinder position="-0.5 0.6 0" radius="0.06" height="0.1" rotation="0 0 90" color="#0A0A0A"></a-cylinder>
+      <a-cylinder position="0.5 0.6 4" radius="0.06" height="0.1" rotation="0 0 90" color="#0A0A0A"></a-cylinder>
+      <a-cylinder position="-0.5 0.6 4" radius="0.06" height="0.1" rotation="0 0 90" color="#0A0A0A"></a-cylinder>
+      
+      <a-box position="0.6 0.2 -1" width="0.08" height="0.4" depth="10" color="#0A0A0A"></a-box>
+      <a-box position="-0.6 0.2 -1" width="0.08" height="0.4" depth="10" color="#0A0A0A"></a-box>
+    </a-entity>
+
+    <!-- Brazo Robótico Industrial -->
+    <a-entity id="robot" position="2.5 0 2" robot-arm>
+      <a-entity id="arm-base">
+        <a-cylinder position="0 0.25 0" radius="0.45" height="0.5" color="#FF6B00" shadow></a-cylinder>
+        <a-cylinder position="0 0.55 0" radius="0.35" height="0.1" color="#FF8C00"></a-cylinder>
+        <a-circle position="0 0.52 0.36" radius="0.12" rotation="-90 0 0" color="#1C1C1C"></a-circle>
+        <a-cylinder position="0 1.1 0" radius="0.18" height="1" color="#FF8C00" shadow></a-cylinder>
+        
+        <a-entity id="shoulder-joint" position="0 1.6 0">
+          <a-sphere radius="0.22" color="#FF6B00" shadow></a-sphere>
+          <a-box position="0 0.05 0.5" width="0.15" height="0.15" depth="1" color="#FF8C00" shadow></a-box>
+          
+          <a-entity id="elbow-joint" position="0 0 1">
+            <a-sphere radius="0.18" color="#FF6B00" shadow></a-sphere>
+            <a-box position="0 0 0.45" width="0.12" height="0.12" depth="0.9" color="#FF8C00" shadow></a-box>
+            
+            <a-entity id="wrist" position="0 0 0.9">
+              <a-cylinder radius="0.12" height="0.15" color="#505050" shadow></a-cylinder>
+              
+              <a-entity id="gripper-center" position="0 0 0.1">
+                <a-cylinder radius="0.08" height="0.08" color="#3A3A3A"></a-cylinder>
+                <a-box position="0 0 0.08" width="0.2" height="0.06" depth="0.08" color="#1C1C1C"></a-box>
+                
+                <a-entity id="left-finger" position="-0.15 0 0.12">
+                  <a-box position="0 0 0.1" width="0.06" height="0.08" depth="0.2" color="#1C1C1C" shadow></a-box>
+                  <a-box position="0.01 0 0.2" width="0.04" height="0.06" depth="0.03" color="#FFD700"></a-box>
+                </a-entity>
+                
+                <a-entity id="right-finger" position="0.15 0 0.12">
+                  <a-box position="0 0 0.1" width="0.06" height="0.08" depth="0.2" color="#1C1C1C" shadow></a-box>
+                  <a-box position="-0.01 0 0.2" width="0.04" height="0.06" depth="0.03" color="#FFD700"></a-box>
+                </a-entity>
+              </a-entity>
+            </a-entity>
+          </a-entity>
+        </a-entity>
+      </a-entity>
+      
+      <!-- Panel de control -->
+      <a-entity position="0.7 1 0">
+        <a-box width="0.3" height="0.8" depth="0.12" color="#1C1C1C" shadow></a-box>
+        <a-circle position="0 0.25 0.07" radius="0.05" color="#00FF00" material="emissive: #00FF00; emissiveIntensity: 1"></a-circle>
+        <a-circle position="0 0.1 0.07" radius="0.05" color="#FFD700" material="emissive: #FFD700; emissiveIntensity: 1"></a-circle>
+        <a-circle position="0 -0.05 0.07" radius="0.05" color="#FF0000" material="emissive: #FF0000; emissiveIntensity: 1"></a-circle>
+        <a-text value="STATUS" position="0 -0.2 0.07" align="center" color="#FFD700" width="1"></a-text>
+      </a-entity>
+    </a-entity>
+
+    <!-- Modelos CAD GLB adicionales -->
+    <!-- Robot Industrial 1 -->
+    <a-entity 
+      gltf-model="base.glb"
+      position="-4 0 -3"
+      scale="1.2 1.2 1.2"
+      rotation="0 90 0"
+      shadow="cast: true; receive: true"
+      animation="property: rotation; to: 0 450 0; loop: true; dur: 20000; easing: linear">
+    </a-entity>
+
+    <!-- Robot Industrial 2 -->
+    <a-entity 
+      gltf-model="robot.glb"
+      position="-4 0 4"
+      scale="1 1 1"
+      rotation="0 -90 0"
+      shadow="cast: true; receive: true">
+    </a-entity>
+
+    <!-- Camión de Entrega -->
+    <a-entity id="delivery-truck" position="4.5 0 2" delivery-truck>
+      <a-box position="0 0.3 0" width="1.2" height="0.4" depth="2" color="#FFD700" shadow></a-box>
+      <a-box position="0 0.7 -0.8" width="1.2" height="0.8" depth="0.8" color="#FFA500" shadow></a-box>
+      <a-box position="0 0.85 -0.45" width="1" height="0.4" depth="0.1" color="#87CEEB" opacity="0.7"></a-box>
+      <a-box position="0 1.15 -0.8" width="1.2" height="0.1" depth="0.8" color="#FF8C00"></a-box>
+      <a-box position="0 0.25 0.5" width="1.1" height="0.1" depth="1.5" color="#3A3A3A" shadow></a-box>
+      <a-box position="-0.55 0.5 0.5" width="0.05" height="0.5" depth="1.5" color="#505050"></a-box>
+      <a-box position="0.55 0.5 0.5" width="0.05" height="0.5" depth="1.5" color="#505050"></a-box>
+      <a-box position="0 0.5 1.2" width="1.1" height="0.5" depth="0.05" color="#505050"></a-box>
+      <a-box position="0 0.35 -0.2" width="1.1" height="0.2" depth="0.05" color="#505050"></a-box>
+      
+      <a-cylinder position="-0.5 0.15 -0.6" radius="0.15" height="0.1" rotation="0 0 90" color="#0A0A0A"></a-cylinder>
+      <a-cylinder position="0.5 0.15 -0.6" radius="0.15" height="0.1" rotation="0 0 90" color="#0A0A0A"></a-cylinder>
+      <a-cylinder position="-0.5 0.15 0.9" radius="0.15" height="0.1" rotation="0 0 90" color="#0A0A0A"></a-cylinder>
+      <a-cylinder position="0.5 0.15 0.9" radius="0.15" height="0.1" rotation="0 0 90" color="#0A0A0A"></a-cylinder>
+      
+      <a-circle position="-0.4 0.6 -1.21" radius="0.08" rotation="0 0 0" color="#FFFF00" material="emissive: #FFFF00; emissiveIntensity: 0.8"></a-circle>
+      <a-circle position="0.4 0.6 -1.21" radius="0.08" rotation="0 0 0" color="#FFFF00" material="emissive: #FFFF00; emissiveIntensity: 0.8"></a-circle>
+      
+      <a-plane position="0 0.85 -1.21" width="0.4" height="0.15" color="#1C1C1C"></a-plane>
+      <a-text value="AUTO-TRANS" position="0 0.85 -1.22" align="center" color="#FFD700" width="2"></a-text>
+    </a-entity>
+
+    <!-- Almacén Industrial -->
+    <a-entity id="warehouse" position="4.5 0 -6">
+      <a-box position="0 2 0" width="4" height="4" depth="3" color="#1C1C1C" shadow></a-box>
+      <a-box position="0 4.1 0" width="4.2" height="0.2" depth="3.2" color="#0A0A0A"></a-box>
+      <a-box position="0 1.2 1.52" width="2.5" height="2.4" depth="0.05" color="#FF6B00"></a-box>
+      
+      <a-box position="0 2.5 1.53" width="2.5" height="0.15" depth="0.03" color="#FFD700"></a-box>
+      <a-box position="0 1.8 1.53" width="2.5" height="0.15" depth="0.03" color="#FFD700"></a-box>
+      <a-box position="0 1.1 1.53" width="2.5" height="0.15" depth="0.03" color="#FFD700"></a-box>
+      <a-box position="0 0.4 1.53" width="2.5" height="0.15" depth="0.03" color="#FFD700"></a-box>
+      
+      <a-box position="-2.01 2.5 0.5" width="0.02" height="0.6" depth="0.8" color="#87CEEB" opacity="0.6"></a-box>
+      <a-box position="-2.01 2.5 -0.5" width="0.02" height="0.6" depth="0.8" color="#87CEEB" opacity="0.6"></a-box>
+      <a-box position="2.01 2.5 0.5" width="0.02" height="0.6" depth="0.8" color="#87CEEB" opacity="0.6"></a-box>
+      <a-box position="2.01 2.5 -0.5" width="0.02" height="0.6" depth="0.8" color="#87CEEB" opacity="0.6"></a-box>
+      
+      <a-box position="0 0.05 2.8" rotation="-10 0 0" width="2.5" height="0.1" depth="1.2" color="#3A3A3A"></a-box>
+      
+      <a-plane position="0 3.5 1.52" width="3" height="0.5" color="#FF6B00"></a-plane>
+      <a-text value="ZONA AUTOMATIZADA" position="0 3.5 1.53" align="center" color="#000" width="6"></a-text>
+      
+      <a-plane position="0 0.01 3.5" rotation="-90 0 0" width="3" height="1.5" color="#FFD700" opacity="0.3"></a-plane>
+      <a-text value="CARGA/DESCARGA" position="0 0.02 3.5" rotation="-90 0 0" align="center" color="#000" width="5"></a-text>
+    </a-entity>
+
+    <!-- Estructura perimetral industrial -->
+    <a-entity>
+      <a-box position="0 2.5 -8" width="16" height="5" depth="0.2" color="#1C1C1C" opacity="0.8" shadow></a-box>
+      <a-box position="-8 2.5 0" width="0.2" height="5" depth="16" color="#1C1C1C" opacity="0.8" shadow></a-box>
+      <a-box position="8 2.5 0" width="0.2" height="5" depth="16" color="#1C1C1C" opacity="0.8" shadow></a-box>
+      
+      <!-- Vigas superiores -->
+      <a-box position="0 5 -8" width="16" height="0.3" depth="0.3" color="#FF6B00"></a-box>
+      <a-box position="-8 5 0" width="0.3" height="0.3" depth="16" color="#FF6B00"></a-box>
+      <a-box position="8 5 0" width="0.3" height="0.3" depth="16" color="#FF6B00"></a-box>
+      
+      <!-- Columnas estructurales -->
+      <a-box position="-7.5 2.5 -7.5" width="0.4" height="5" depth="0.4" color="#3A3A3A"></a-box>
+      <a-box position="7.5 2.5 -7.5" width="0.4" height="5" depth="0.4" color="#3A3A3A"></a-box>
+      <a-box position="-7.5 2.5 7.5" width="0.4" height="5" depth="0.4" color="#3A3A3A"></a-box>
+      <a-box position="7.5 2.5 7.5" width="0.4" height="5" depth="0.4" color="#3A3A3A"></a-box>
+    </a-entity>
+
+    <!-- Señalización industrial -->
+    <a-plane position="0 0.01 7" rotation="-90 0 0" width="5" height="0.6" color="#FF6B00"></a-plane>
+    <a-text value="Planta de Control de Calidad" position="0 0.02 7" rotation="-90 0 0" align="center" color="#000" width="8"></a-text>
+   
+    <!-- Líneas de seguridad en el piso -->
+    <a-box position="-6 0.01 0" rotation="-90 0 0" width="0.15" height="14" depth="0.02" color="#FFD700"></a-box>
+    <a-box position="6.5 0.01 0" rotation="-90 0 0" width="0.15" height="14" depth="0.02" color="#FFD700"></a-box>
+
+    <!-- Paneles de control y monitores -->
+    <a-entity position="-7 0 2">
+      <a-box width="0.6" height="1.5" depth="0.15" color="#1C1C1C" shadow position="0 0.75 0"></a-box>
+      <a-plane width="0.5" height="0.8" color="#00FF00" position="0 1 0.08" opacity="0.8"></a-plane>
+      <a-text value="SISTEMA\nACTIVO\n100%" position="0 1 0.09" align="center" color="#000" width="2"></a-text>
+      
+      <!-- Botones -->
+      <a-circle position="-0.15 0.3 0.08" radius="0.06" color="#00FF00" material="emissive: #00FF00; emissiveIntensity: 1.5"></a-circle>
+      <a-circle position="0 0.3 0.08" radius="0.06" color="#FFD700" material="emissive: #FFD700; emissiveIntensity: 1.5"></a-circle>
+      <a-circle position="0.15 0.3 0.08" radius="0.06" color="#FF0000" material="emissive: #FF0000; emissiveIntensity: 1.5"></a-circle>
+    </a-entity>
+
+    <!-- Luces indicadoras de estado -->
+    <a-entity position="-7 4.5 -6">
+      <a-sphere radius="0.15" color="#00FF00" material="emissive: #00FF00; emissiveIntensity: 2"></a-sphere>
+      <a-text value="OPERATIVO" position="0 -0.4 0" align="center" color="#FFD700" width="2.5"></a-text>
+    </a-entity>
+    <a-entity position="-7 3.8 -6">
+      <a-sphere radius="0.15" color="#FFD700" material="emissive: #FFD700; emissiveIntensity: 2"></a-sphere>
+      <a-text value="EN PROCESO" position="0 -0.4 0" align="center" color="#FFD700" width="2.5"></a-text>
+    </a-entity>
+
+    <!-- Torres de iluminación industrial -->
+    <a-entity position="-6 0 -6">
+      <a-cylinder radius="0.08" height="4" position="0 2 0" color="#3A3A3A"></a-cylinder>
+      <a-cylinder radius="0.15" height="0.3" position="0 4.2 0" color="#FFD700" material="emissive: #FFD700; emissiveIntensity: 1.5"></a-cylinder>
+      <a-light type="point" position="0 4.2 0" color="#FFD700" intensity="0.5"></a-light>
+    </a-entity>
+    
+    <a-entity position="6 0 -6">
+      <a-cylinder radius="0.08" height="4" position="0 2 0" color="#3A3A3A"></a-cylinder>
+      <a-cylinder radius="0.15" height="0.3" position="0 4.2 0" color="#FFD700" material="emissive: #FFD700; emissiveIntensity: 1.5"></a-cylinder>
+      <a-light type="point" position="0 4.2 0" color="#FFD700" intensity="0.5"></a-light>
+    </a-entity>
+
+    <a-entity position="-6 0 6">
+      <a-cylinder radius="0.08" height="4" position="0 2 0" color="#3A3A3A"></a-cylinder>
+      <a-cylinder radius="0.15" height="0.3" position="0 4.2 0" color="#FF6B00" material="emissive: #FF6B00; emissiveIntensity: 1.5"></a-cylinder>
+      <a-light type="point" position="0 4.2 0" color="#FF6B00" intensity="0.5"></a-light>
+    </a-entity>
+
+    <a-entity position="6 0 6">
+      <a-cylinder radius="0.08" height="4" position="0 2 0" color="#3A3A3A"></a-cylinder>
+      <a-cylinder radius="0.15" height="0.3" position="0 4.2 0" color="#FF6B00" material="emissive: #FF6B00; emissiveIntensity: 1.5"></a-cylinder>
+      <a-light type="point" position="0 4.2 0" color="#FF6B00" intensity="0.5"></a-light>
+    </a-entity>
+
+    <!-- Estaciones de trabajo adicionales -->
+    <a-entity position="6.5 0 -2">
+      <a-box width="1.2" height="0.1" depth="1.2" position="0 0.8 0" color="#3A3A3A" shadow></a-box>
+      <a-box width="0.15" height="0.8" depth="0.15" position="-0.5 0.4 -0.5" color="#1C1C1C"></a-box>
+      <a-box width="0.15" height="0.8" depth="0.15" position="0.5 0.4 -0.5" color="#1C1C1C"></a-box>
+      <a-box width="0.15" height="0.8" depth="0.15" position="-0.5 0.4 0.5" color="#1C1C1C"></a-box>
+      <a-box width="0.15" height="0.8" depth="0.15" position="0.5 0.4 0.5" color="#1C1C1C"></a-box>
+      
+      <!-- Monitor en la estación -->
+      <a-box width="0.5" height="0.35" depth="0.05" position="0 1.2 -0.5" color="#1C1C1C"></a-box>
+      <a-plane width="0.45" height="0.3" position="0 1.2 -0.47" color="#00FFFF" opacity="0.7"></a-plane>
+    </a-entity>
+
+    <!-- Cartelería industrial -->
+    <a-plane position="7.9 2.5 0" rotation="0 -90 0" width="3" height="1.5" color="#FF6B00"></a-plane>
+    <a-text value="ZONA\nRESTRINGIDA\nPERSONAL\nAUTORIZADO" position="7.91 2.5 0" rotation="0 -90 0" align="center" color="#000" width="4"></a-text>
+
+    <a-plane position="-7.9 2.5 0" rotation="0 90 0" width="3" height="1.5" color="#FFD700"></a-plane>
+    <a-text value="ATENCION\nEQUIPO EN\nOPERACION" position="-7.91 2.5 0" rotation="0 90 0" align="center" color="#000" width="4"></a-text>
+
+    <!-- Tubería industrial -->
+    <a-cylinder position="-7.5 4.5 0" radius="0.12" height="16" rotation="0 0 90" color="#505050"></a-cylinder>
+    <a-cylinder position="7.5 4.5 0" radius="0.12" height="16" rotation="0 0 90" color="#505050"></a-cylinder>
+    
+    <!-- Válvulas en tuberías -->
+    <a-cylinder position="-7.5 4.5 -3" radius="0.2" height="0.3" rotation="90 0 0" color="#FF0000"></a-cylinder>
+    <a-cylinder position="-7.5 4.5 3" radius="0.2" height="0.3" rotation="90 0 0" color="#00FF00"></a-cylinder>
+    <a-cylinder position="7.5 4.5 -3" radius="0.2" height="0.3" rotation="90 0 0" color="#FF0000"></a-cylinder>
+    <a-cylinder position="7.5 4.5 3" radius="0.2" height="0.3" rotation="90 0 0" color="#00FF00"></a-cylinder>
+
+    <!-- Extintores de seguridad -->
+    <a-cylinder position="-7.7 1 -2" radius="0.12" height="0.8" color="#FF0000"></a-cylinder>
+    <a-cone position="-7.7 1.5 -2" radius-bottom="0.12" radius-top="0.08" height="0.3" color="#1C1C1C"></a-cone>
+    
+    <a-cylinder position="7.7 1 -2" radius="0.12" height="0.8" color="#FF0000"></a-cylinder>
+    <a-cone position="7.7 1.5 -2" radius-bottom="0.12" radius-top="0.08" height="0.3" color="#1C1C1C"></a-cone>
+
+    <!-- Cielo industrial -->
+    <a-sky color="#0D0D0D"></a-sky>
+
+    <!-- Niebla ambiental -->
+    <a-entity light="type: ambient; color: #222; intensity: 0.4"></a-entity>
+  </a-scene>
+</body>
+</html>
